@@ -46,7 +46,7 @@ find_package(pcl_ros REQUIRED)
 find_package(pcl_conversions REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(visualization_msgs REQUIRED)
-# find_package(livox_ros_driver2 REQUIRED)
+find_package(livox_ros_driver2 REQUIRED)
 
 find_package(Eigen3 REQUIRED)
 

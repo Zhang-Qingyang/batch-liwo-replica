@@ -1,0 +1,4 @@
+Invoking command in '/home/zhangqingyang/point_lio_ros2/build/point_lio': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/humble /usr/bin/cmake --build /home/zhangqingyang/point_lio_ros2/build/point_lio -- -j12 -l12
+Invoked command in '/home/zhangqingyang/point_lio_ros2/build/point_lio' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/humble /usr/bin/cmake --build /home/zhangqingyang/point_lio_ros2/build/point_lio -- -j12 -l12
+Invoking command in '/home/zhangqingyang/point_lio_ros2/build/point_lio': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/humble /usr/bin/cmake --install /home/zhangqingyang/point_lio_ros2/build/point_lio
+Invoked command in '/home/zhangqingyang/point_lio_ros2/build/point_lio' returned '0': CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}:/opt/ros/humble /usr/bin/cmake --install /home/zhangqingyang/point_lio_ros2/build/point_lio

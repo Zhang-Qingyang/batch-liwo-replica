@@ -3,6 +3,20 @@
 #define RETURN0     0x00
 #define RETURN0AND1 0x10
 
+struct EIGEN_ALIGN16 LivoxPoint {
+    PCL_ADD_POINT4D;
+    float intensity;
+    std::uint8_t tag;
+    std::uint8_t line;
+    double timestamp; // 纳秒级时间戳
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+};
+
+POINT_CLOUD_REGISTER_POINT_STRUCT(LivoxPoint,
+    (float, x, x) (float, y, y) (float, z, z) (float, intensity, intensity)
+    (std::uint8_t, tag, tag) (std::uint8_t, line, line) (double, timestamp, timestamp)
+)
+
 Preprocess::Preprocess()
         : lidar_type(AVIA), blind(0.01), point_filter_num(1) {
     inf_bound = 10;
@@ -38,11 +52,7 @@ void Preprocess::set(bool feat_en, int lid_type, double bld, int pfilt_num) {
     point_filter_num = pfilt_num;
 }
 
-// void Preprocess::process(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out) {
-//     avia_handler(msg);
-//     *pcl_out = pl_surf;
-// }
-
+// 修改后的 process 函数，支持 PointCloud2 输入
 void Preprocess::process(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, PointCloudXYZI::Ptr &pcl_out) {
     switch (time_unit) {
         case SEC:
@@ -78,56 +88,69 @@ void Preprocess::process(const sensor_msgs::msg::PointCloud2::SharedPtr &msg, Po
         case UNILIDAR:
             unilidar_handler(msg);
             break;
+        
+        case AVIA: 
+            avia_handler(msg);
+            break;
 
         default:
-            printf("Error LiDAR Type");
+            printf("Error LiDAR Type: %d\n", lidar_type);
             break;
     }
     *pcl_out = pl_surf;
 }
 
-// void Preprocess::avia_handler(const livox_ros_driver2::msg::CustomMsg::SharedPtr &msg) {
-//     pl_surf.clear();
-//     pl_corn.clear();
-//     pl_full.clear();
-//     double t1 = omp_get_wtime();
-//     int plsize = msg->point_num;
+// [重写] avia_handler 适配 PointCloud2 格式
+void Preprocess::avia_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
+    pl_surf.clear();
+    pl_corn.clear();
+    pl_full.clear();
 
-//     pl_corn.reserve(plsize);
-//     pl_surf.reserve(plsize);
-//     pl_full.resize(plsize);
+    // 使用我们定义的 LivoxPoint 结构体来解析 ROS 消息
+    pcl::PointCloud<LivoxPoint> pl_orig;
+    pcl::fromROSMsg(*msg, pl_orig);
 
-//     uint valid_num = 0;
+    int plsize = pl_orig.size();
+    if (plsize == 0) return;
 
-//     for (uint i = 1; i < plsize; i++) {
-//         if ((msg->points[i].line < N_SCANS) &&
-//             ((msg->points[i].tag & 0x30) == 0x10 || (msg->points[i].tag & 0x30) == 0x00)) {
-//             valid_num++;
-//             if (valid_num % point_filter_num == 0) {
-//                 pl_full[i].x = msg->points[i].x;
-//                 pl_full[i].y = msg->points[i].y;
-//                 pl_full[i].z = msg->points[i].z;
-//                 pl_full[i].intensity = msg->points[i].reflectivity;
-//                 pl_full[i].curvature = msg->points[i].offset_time /
-//                                        float(1000000); // use curvature as time of each laser points, curvature unit: ms
+    pl_surf.reserve(plsize);
 
-//                 if (i == 0) pl_full[i].curvature = fabs(pl_full[i].curvature) < 1.0 ? pl_full[i].curvature : 0.0;
-//                 else pl_full[i].curvature =
-//                              fabs(pl_full[i].curvature - pl_full[i - 1].curvature) < 1.0 ? pl_full[i].curvature :
-//                              pl_full[i - 1].curvature + 0.004166667f;
+    // 计算基准时间（通常取这一帧第一个点或最后一个点的时间，这里取第一个点）
+    // 注意：Livox驱动输出的 timestamp 单位通常是纳秒
+    double time_head = pl_orig.points[0].timestamp;
 
-//                 if ((abs(pl_full[i].x - pl_full[i - 1].x) > 1e-7)
-//                     || (abs(pl_full[i].y - pl_full[i - 1].y) > 1e-7)
-//                     || (abs(pl_full[i].z - pl_full[i - 1].z) > 1e-7)
-//                        && (pl_full[i].x * pl_full[i].x + pl_full[i].y * pl_full[i].y + pl_full[i].z * pl_full[i].z >
-//                            (blind * blind))) {
-//                     pl_surf.push_back(pl_full[i]);
-//                 }
-//             }
-//         }
-//     }
+    uint valid_num = 0;
 
-// }
+    for (int i = 0; i < plsize; i++) {
+        // Mid360 不需要像 Avia 那样严格检查 line < N_SCANS，但为了兼容性保留 tag 检查
+        // tag & 0x30: 0x10=Return 0 (High confidence), 0x00=Return 0
+        if ((pl_orig.points[i].tag & 0x30) == 0x10 || (pl_orig.points[i].tag & 0x30) == 0x00) {
+            
+            valid_num++;
+            if (valid_num % point_filter_num == 0) {
+                
+                PointType added_pt;
+                added_pt.x = pl_orig.points[i].x;
+                added_pt.y = pl_orig.points[i].y;
+                added_pt.z = pl_orig.points[i].z;
+                added_pt.intensity = pl_orig.points[i].intensity;
+                
+                // [关键] 计算相对时间（曲率），单位：毫秒(ms)
+                // Point-LIO 利用 curvature 存储该点相对于帧头的时间偏移，用于去畸变
+                double timestamp_ns = pl_orig.points[i].timestamp;
+                // 如果时间戳异常(小于帧头)，说明可能是乱序或回绕，简单处理为0
+                if(timestamp_ns < time_head) timestamp_ns = time_head;
+                
+                added_pt.curvature = (timestamp_ns - time_head) / 1e6; // ns -> ms
+
+                // 距离过滤
+                if ((added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z) > (blind * blind)) {
+                     pl_surf.points.push_back(added_pt);
+                }
+            }
+        }
+    }
+}
 
 void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
     pl_surf.clear();
@@ -141,8 +164,6 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &
 
 
     double time_stamp = rclcpp::Time(msg->header.stamp).seconds();
-    // cout << "===================================" << endl;
-    // printf("Pt size = %d, N_SCANS = %d\r\n", plsize, N_SCANS);
     for (int i = 0; i < pl_orig.points.size(); i++) {
         if (i % point_filter_num != 0) continue;
 
@@ -164,9 +185,6 @@ void Preprocess::oust64_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &
 
         pl_surf.points.push_back(added_pt);
     }
-
-    // pub_func(pl_surf, pub_full, msg->header.stamp);
-    // pub_func(pl_surf, pub_corn, msg->header.stamp);
 }
 
 void Preprocess::velodyne_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
@@ -269,7 +287,6 @@ void Preprocess::unilidar_handler(const sensor_msgs::msg::PointCloud2::SharedPtr
 
     pl_surf.reserve(plsize);
 
-    // std::cout << "plsize = " << plsize << ", given_offset_time = " << given_offset_time << std::endl;
     int countElimnated = 0;
     for (int i = 0; i < plsize; i++)
     {
@@ -296,9 +313,6 @@ void Preprocess::unilidar_handler(const sensor_msgs::msg::PointCloud2::SharedPtr
         countElimnated++;
       }
     }
-
-    // std::cout << "pl_surf.size() = " << pl_surf.size() << ", countElimnated = " << countElimnated << std::endl;
-    
 }
 
 void Preprocess::hesai_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &msg) {
@@ -312,34 +326,16 @@ void Preprocess::hesai_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &m
     if (plsize == 0) return;
     pl_surf.reserve(plsize);
 
-    /*** These variables only works when no point timestamps given ***/
-    double omega_l = 0.361 * SCAN_RATE;       // scan angular velocity
-    std::vector<bool> is_first(N_SCANS, true);
-    std::vector<double> yaw_fp(N_SCANS, 0.0);      // yaw of first scan point
-    std::vector<float> yaw_last(N_SCANS, 0.0);   // yaw of last scan point
-    std::vector<float> time_last(N_SCANS, 0.0);  // last offset time
-    /*****************************************************************/
-
     if (pl_orig.points[plsize - 1].timestamp > 0) {
         given_offset_time = true;
     } else {
         given_offset_time = false;
-        double yaw_first = atan2(pl_orig.points[0].y, pl_orig.points[0].x) * 57.29578;
-        double yaw_end = yaw_first;
-        int layer_first = pl_orig.points[0].ring;
-        for (uint i = plsize - 1; i > 0; i--) {
-            if (pl_orig.points[i].ring == layer_first) {
-                yaw_end = atan2(pl_orig.points[i].y, pl_orig.points[i].x) * 57.29578;
-                break;
-            }
-        }
     }
 
     double time_head = pl_orig.points[0].timestamp;
 
     for (int i = 0; i < plsize; i++) {
         PointType added_pt;
-        // cout<<"!!!!!!"<<i<<" "<<plsize<<endl;
 
         added_pt.normal_x = 0;
         added_pt.normal_y = 0;
@@ -349,34 +345,8 @@ void Preprocess::hesai_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &m
         added_pt.z = pl_orig.points[i].z;
         added_pt.intensity = pl_orig.points[i].intensity;
         added_pt.curvature = (pl_orig.points[i].timestamp - time_head) *
-                             1000.f; // time_unit_scale;  // curvature unit: ms // cout<<added_pt.curvature<<endl;
-        if (!given_offset_time) {
-            int layer = pl_orig.points[i].ring;
-            double yaw_angle = atan2(added_pt.y, added_pt.x) * 57.2957;
-
-            if (is_first[layer]) {
-                // printf("layer: %d; is first: %d", layer, is_first[layer]);
-                yaw_fp[layer] = yaw_angle;
-                is_first[layer] = false;
-                added_pt.curvature = 0.0;
-                yaw_last[layer] = yaw_angle;
-                time_last[layer] = added_pt.curvature;
-                continue;
-            }
-
-            // compute offset time
-            if (yaw_angle <= yaw_fp[layer]) {
-                added_pt.curvature = (yaw_fp[layer] - yaw_angle) / omega_l;
-            } else {
-                added_pt.curvature = (yaw_fp[layer] - yaw_angle + 360.0) / omega_l;
-            }
-
-            if (added_pt.curvature < time_last[layer]) added_pt.curvature += 360.0 / omega_l;
-
-            yaw_last[layer] = yaw_angle;
-            time_last[layer] = added_pt.curvature;
-        }
-
+                             1000.f; 
+        
         if (i % point_filter_num == 0) {
             if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > (blind * blind)) {
                 pl_surf.points.push_back(added_pt);
@@ -387,6 +357,7 @@ void Preprocess::hesai_handler(const sensor_msgs::msg::PointCloud2::SharedPtr &m
 }
 
 void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &types) {
+    // 保持原始代码不变
     int plsize = pl.size();
     int plsize2;
     if (plsize == 0) {
@@ -429,7 +400,6 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
                 }
             }
 
-            // if(last_state==1 && fabs(last_direct.sum())>0.5)
             if (last_state == 1 && last_direct.norm() > 0.1) {
                 double mod = last_direct.transpose() * curr_direct;
                 if (mod > -0.707 && mod < 0.707) {
@@ -441,7 +411,7 @@ void Preprocess::give_feature(pcl::PointCloud<PointType> &pl, vector<orgtype> &t
 
             i = i_nex - 1;
             last_state = 1;
-        } else // if(plane_type == 2)
+        } else 
         {
             i = i_nex;
             last_state = 0;
@@ -608,8 +578,7 @@ int Preprocess::plane_judge(const PointCloudXYZI &pl, vector<orgtype> &types, ui
                             Eigen::Vector3d &curr_direct) {
     double group_dis = disA * types[i_cur].range + disB;
     group_dis = group_dis * group_dis;
-    // i_nex = i_cur;
-
+    
     double two_dis;
     vector<double> disarr;
     disarr.reserve(20);
