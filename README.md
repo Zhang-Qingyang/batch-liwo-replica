@@ -28,12 +28,14 @@ Point-LIO（和所有基于滤波的slam）的算法核心在于两个步骤（�
 
 借助这种机制，point_lio同时具备了“高带宽”和“高鲁棒”两种特性，比如现在车被撞了一下，传统lio必须等到下一帧imu数据到了，才知道加速度变了，但是point-lio通过带宽极高的lidar点修正，就能够瞬间感知到运动状态的变化。
 
-**下面理一下整体的公式推导。**先说记号
+**下面理一下整体的公式推导**。先说记号
 
-Point-LIO的状态向量是一个$SO(3)\times \mathbb{R}^{21}$流形上的24维向量，如下：
+Point-LIO的状态向量是一个$SO(3)$流形上的24维向量，如下：
+
 $$
 \boldsymbol x=[^GR_I,\,^Gp_I,\,^Gv_I,\,b_g,\,b_a,\,^I\omega,\,^Ia]
 $$
+
 其中：
 
 $^GR_I$是IMU坐标系到世界坐标系的旋转矩阵（姿态）
@@ -61,6 +63,7 @@ $\delta x$是误差，就是真实值和估计值中间的差值
 有了这些记号，就可以开始推导。
 
 首先推状态转移模型，在推出具体的计算公式（即离散时间模型）之前，我们先要找出连续时间下的运动学模型。Point-LIO的选择是直接用积分的方法把各种量积出来（机器人运动具有一定程度的连续性，因此积分足够用），并且认为随机游走IMU零偏（$b_g$和$b_a$）服从高斯分布$n_{b_g}$和$n_{b_a}$，并且方差分别为$Q_{b_g}$和$Q_{b_a}$。将 IMU 坐标系（记为 $I$）作为机体坐标系，并将第一帧 IMU 坐标系作为全局坐标系（记为 $G$），连续运动学模型如下，即为论文中(2)式：
+
 $$
 \begin{aligned}
 {}^G\dot{\mathbf{R}}_I &= {}^G\mathbf{R}_I \lfloor {}^I\boldsymbol{\omega} \rfloor, & {}^G\dot{\mathbf{p}}_I &= {}^G\mathbf{v}_I, & {}^G\dot{\mathbf{v}}_I &= {}^G\mathbf{R}_I {}^I\mathbf{a} + {}^G\mathbf{g}, & {}^G\dot{\mathbf{g}} &= \mathbf{0} \\
@@ -70,13 +73,16 @@ $$
 
 下面尝试对(2)式离散化。由于Point-LIO所处理的状态空间并不是一个纯粹的欧氏空间，而是包括了平移和旋转两个子流形，即上面说的$SO(3)\times \mathbb{R}^{21}$流形，其中前面的旋转矩阵代表SO(3)的子流形（即特殊正交群，三个自由度，代表三维空间中所有可能的旋转操作），需要用Lie群的指数映射（即Rodrigues公式）处理，后面的21维线性空间包括了位置、角速度、加速度等，属于欧氏空间，只要用普通的线性代数的方法就能处理（中间那个乘号是Descartes积）。为了方便处理，定义两个记号boxplus和boxminus（流形上的广义加减法），具体运算如下：
 
-<img src="/home/zhangqingyang/batch_liwo_replica/assets/image-20251205074937643.png" alt="image-20251205074937643" style="zoom:33%;" />
+<img src="./assets/image-20251205074937643.png" alt="image-20251205074937643" style="zoom:33%;" />
 
 由此，我们可以通过这两个记号直接操作状态空间，而不用分开分别处理平移运动和旋转运动。根据上面的连续时间运动学模型，我们可以直接将其写成状态空间的形式，也就是
+
 $$
 x_{k+1}=x_k\boxplus(\Delta t_kf(x_k,w_k))
 $$
+
 这个式子就是**状态转移模型**。其中误差状态函数$f$以及过程噪声 $\mathbf{w}$ 定义如下：
+
 $$
 \begin{aligned}
 \mathbf{w} &\triangleq [\mathbf{n}_{b_g} \quad \mathbf{n}_{b_a} \quad \mathbf{w}_g \quad \mathbf{w}_a] \approx \mathcal{N}(\mathbf{0}, \mathcal{Q}) \\
@@ -90,19 +96,23 @@ $$
 
 首先明确一下怎么衡量一个lidar点的误差，我们没有直接衡量的手段，但是可以选择相信之前的点。一个lidar点如果是可信的，它一定处在某个平面上，无论这个平面多么小（因为真实世界中很少有单独挂在空中的微小物体），也就是，我们可以将它周围的点拟合出一个平面，计算这个lidar点到该平面的距离，作为误差，更准确的说是残差（residual），如下图
 
-<img src="/home/zhangqingyang/batch_liwo_replica/assets/image-20251205075059258.png" alt="image-20251205075059258" style="zoom:33%;" />
+<img src="./assets/image-20251205075059258.png" alt="image-20251205075059258" style="zoom:33%;" />
 
 根据以上分析，我们可以得出对lidar点的处理逻辑。首先是建模，我们将单个lidar点建模为真实位置+噪声的形式，并将所有噪声都视为guassian noise，即为
+
 $$
 ^Ip_{m_k}=^Ip_k^{gt}+n_{L_k}
 $$
+
 其中左上角标$I$表示是在IMU坐标系下，$^Ip_{m_k}$表示第$k$个lidar点的位置，$^Ip_k^{gt}$表示该点真实位置，最后面那个就是噪声。然后就是所谓“**隐式测量模型**”，也就是在理想情况下，测量点需要满足的一个式子
+
 $$
 0=^Gu_k^T(^GT_{I_k}(^Ip_{m_k}-n_{L_k})-^Gq_k)
 $$
+
 其中，$^GT_{I_k}$是从世界坐标系变换到IMU坐标系的齐次变换矩阵，$^Gq_k$是拟合出平面上的任意一点。要求这个式子（其实说了半天本质上就是个平面距离公式）为0，就相当于要求（变换到世界坐标系下的）测量点必须在平面上。后面这个式子记为$h_L(x_k,^Ip_{m_k},n_{L_k})$，然后就是IMU测量模型，这个没有太复杂的公式，基本上仍然是真实值+噪声的逻辑，直接贴原文
 
-<img src="/home/zhangqingyang/batch_liwo_replica/assets/image-20251205081900290.png" alt="image-20251205081900290" style="zoom:33%;" />
+<img src="./assets/image-20251205081900290.png" alt="image-20251205081900290" style="zoom:33%;" />
 
 到这里，建模部分基本完成，状态转移模型和测量模型都已经明确，下一步开始进行滤波器设计。point_lio的滤波器是“紧耦合（tight coupled）Kalman滤波”，意味着lidar点和imu数据修改同一个状态向量。状态传播模型
 
@@ -134,14 +144,16 @@ $$
 为了使用扩展卡尔曼滤波（EKF）更新状态，我们需要知道这个残差相对于误差状态$\delta x$是如何变化的，也就是求雅可比矩阵$H_{L_{k+1}}$
 
 我们将非线性的观测函数$h_L$在预测状态处进行一阶泰勒展开
+
 $$
 r_{L_{k+1}}=H_{L_{k+1}}\delta x_{k+1}+D_{L_{k+1}}n_{L_{k+1}}
 $$
+
 其中H_L矩阵和D_L矩阵通过求导计算得出，论文中已经给出计算过程。
 
 对于imu数据，可得类似结论，逻辑是一样的，这里直接贴原文
 
-<img src="/home/zhangqingyang/batch_liwo_replica/assets/image-20251209131103085.png" alt="image-20251209131103085" style="zoom: 25%;" />
+<img src="./assets/image-20251209131103085.png" alt="image-20251209131103085" style="zoom: 25%;" />
 
 至此还剩最后一步，就是状态更新。
 
@@ -152,31 +164,39 @@ $$
 具体流程如下：
 
 计算卡尔曼增益
+
 $$
 \mathbf{K} = \mathbf{P} \mathbf{H}^T (\mathbf{H} \mathbf{P} \mathbf{H}^T + \mathbf{R})^{-1}
 $$
+
 然后更新误差状态。有了增益$K$和残差$r$，就能算出我们这次应该把状态往回拉多少：
+
 $$
 \delta \mathbf{x} = \mathbf{K} \mathbf{r}
 $$
+
 注意，算出来的这个$\delta \mathbf{x}$是误差状态，是在切空间（tangent space）里的。
 
 再把算出来的“误差”补偿回“名义状态”上。因为有旋转矩阵的存在，不能直接加减，得用我们前面定义的boxplus操作：
+
 $$
 x_{k+1}^{updated} = x_{k+1}^{predicted} \boxplus \delta \mathbf{x}
 $$
+
 更新完一次状态后，我们用这个新的$x_{k+1}^{updated}$作为新的线性化点，重新去地图里找最近点、重新算残差、重新算雅可比，看看能不能让结果更收敛。
 
 更新协方差（Update Covariance）：等迭代结束（收敛了），状态修正准了，把协方差矩阵$P$也更新一下。因为融合了雷达观测，系统的不确定性下降了，$P$矩阵会变小：
+
 $$
 \mathbf{P}^{updated} = (\mathbf{I} - \mathbf{K} \mathbf{H}) \mathbf{P}
 $$
+
 最后，把这个经过层层修正、已经非常“准”的当前点，插入到ikd-Tree中。
 这一步非常关键，因为**现在的观测点，就是下一时刻的地图**。Point-LIO之所以快，就是因为ikd-Tree支持增量式更新（动态平衡二叉树），不需要像传统方法那样重构整个地图。
 
 这一套下来，就实现了在算力有限的平台上（比如无人机机载电脑），既能跑得飞快（高带宽），又能抗住剧烈运动（高鲁棒）的效果。最后回顾一下论文里最后提供的伪代码流程，总览一下整个流程
 
-<img src="/home/zhangqingyang/batch_liwo_replica/assets/image-20251209133838722.png" alt="image-20251209133838722" style="zoom:25%;" />
+<img src="./assets/image-20251209133838722.png" alt="image-20251209133838722" style="zoom:25%;" />
 
 
 
